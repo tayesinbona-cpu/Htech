@@ -159,55 +159,85 @@
 
         // Initialize App
         async function init() {
-            const { data: { session } } = await supabaseClient.auth.getSession();
-            state.user = session?.user ?? null;
-            
-            if (state.user) {
-                await fetchProfile(state.user.id);
-            }
-            
-            state.loading = false;
-            render();
-
-            // Listen for auth changes
-            supabaseClient.auth.onAuthStateChange(async (event, session) => {
+            try {
+                const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+                if (sessionError) throw sessionError;
+                
                 state.user = session?.user ?? null;
+                
                 if (state.user) {
                     await fetchProfile(state.user.id);
-                } else {
-                    state.profile = null;
-                    state.view = 'home';
+                    await fetchPosts();
                 }
+                
+                state.loading = false;
                 render();
-            });
+
+                // Listen for auth changes
+                supabaseClient.auth.onAuthStateChange(async (event, session) => {
+                    state.user = session?.user ?? null;
+                    if (state.user) {
+                        await fetchProfile(state.user.id);
+                        await fetchPosts();
+                    } else {
+                        state.profile = null;
+                        state.posts = [];
+                        state.view = 'home';
+                    }
+                    render();
+                });
+            } catch (err) {
+                console.error("Initialization error:", err);
+                state.loading = false;
+                render();
+            }
         }
 
         async function fetchProfile(userId) {
-            const { data } = await supabaseClient.from('users').select('*').eq('id', userId).single();
-            if (data) {
-                state.profile = data;
-                if (state.view === 'login' || state.view === 'signup') {
-                    state.view = data.role;
+            try {
+                const { data, error } = await supabaseClient.from('users').select('*').eq('id', userId).single();
+                
+                if (data) {
+                    state.profile = data;
+                    if (state.view === 'login' || state.view === 'signup') {
+                        state.view = data.role;
+                    }
+                } else {
+                    // Create profile if it doesn't exist
+                    const { data: newProfile, error: insertError } = await supabaseClient.from('users').insert([{ 
+                        id: userId, 
+                        email: state.user.email, 
+                        role: 'student' 
+                    }]).select().single();
+                    
+                    if (insertError) throw insertError;
+                    state.profile = newProfile;
+                    state.view = 'student';
                 }
-            } else {
-                const { data: newProfile } = await supabaseClient.from('users').insert([{ 
-                    id: userId, 
-                    email: state.user.email, 
-                    role: 'student' 
-                }]).select().single();
-                state.profile = newProfile;
-                state.view = 'student';
+            } catch (err) {
+                console.error("Profile fetch error:", err);
             }
         }
 
         async function fetchPosts() {
-            let query = supabaseClient.from('posts').select('*').order('created_at', { ascending: false });
-            if (state.profile?.role === 'student') query = query.or('audience.eq.student,audience.eq.all');
-            if (state.profile?.role === 'teacher') query = query.or('audience.eq.teacher,audience.eq.all');
-            
-            const { data } = await query;
-            if (data) state.posts = data;
-            renderDashboard();
+            try {
+                let query = supabaseClient.from('posts').select('*').order('created_at', { ascending: false });
+                
+                if (state.profile?.role === 'student') {
+                    query = query.or('audience.eq.student,audience.eq.all');
+                } else if (state.profile?.role === 'teacher') {
+                    query = query.or('audience.eq.teacher,audience.eq.all');
+                }
+                
+                const { data, error } = await query;
+                if (error) throw error;
+                state.posts = data || [];
+                if (state.view === 'admin' || state.view === 'teacher' || state.view === 'student') {
+                    renderDashboard();
+                }
+            } catch (err) {
+                console.error("Posts fetch error:", err);
+            }
         }
 
         // Navigation
@@ -479,17 +509,17 @@
         }
 
         async function renderDashboard() {
-            if (state.posts.length === 0) {
-                await fetchPosts();
-                return;
-            }
-
             const main = document.getElementById('main-content');
             main.innerHTML = `
                 <div class="space-y-12">
-                    <header>
-                        <h2 class="text-4xl font-black mb-2 text-white">Welcome, ${state.profile?.full_name || 'User'}</h2>
-                        <p class="text-gray-400">Role: <span class="text-indigo-400 font-bold uppercase">${state.profile?.role}</span></p>
+                    <header class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <div>
+                            <h2 class="text-4xl font-black mb-2 text-white">Welcome, ${state.profile?.full_name || state.user?.email?.split('@')[0] || 'User'}</h2>
+                            <p class="text-gray-400">Role: <span class="text-indigo-400 font-bold uppercase">${state.profile?.role || 'Student'}</span></p>
+                        </div>
+                        <button onclick="fetchPosts()" class="px-4 py-2 glass rounded-xl text-xs font-bold hover:bg-white/10 transition flex items-center gap-2">
+                            <i data-lucide="refresh-cw" class="w-4 h-4"></i> REFRESH CONTENT
+                        </button>
                     </header>
 
                     ${(state.profile?.role === 'admin' || state.profile?.role === 'teacher') ? `
@@ -516,7 +546,7 @@
                     ` : ''}
 
                     <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-                        ${state.posts.map((post, i) => `
+                        ${state.posts.length > 0 ? state.posts.map((post, i) => `
                             <div class="glass p-6 rounded-3xl border border-white/10 flex flex-col h-full group">
                                 <div class="relative overflow-hidden rounded-lg mb-4 aspect-video">
                                     ${post.type === 'image' ? `<img src="${post.file_url}" class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />` : ''}
@@ -534,7 +564,15 @@
                                     </div>
                                 </div>
                             </div>
-                        `).join('')}
+                        `).join('') : `
+                            <div class="col-span-full py-20 text-center space-y-4">
+                                <div class="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto">
+                                    <i data-lucide="folder-open" class="w-10 h-10 text-gray-600"></i>
+                                </div>
+                                <h4 class="text-xl font-bold text-gray-500">No content available yet</h4>
+                                <p class="text-gray-600 max-w-xs mx-auto">Check back later or publish new content if you are a teacher or admin.</p>
+                            </div>
+                        `}
                     </div>
                 </div>
             `;
